@@ -18,7 +18,7 @@ use spl_token_2022::{
 // The length of a ciphertext which is how a decryptable balance is represented in the account data
 pub const AE_CIPHERTEXT_LEN: usize = 36;
  
-declare_id!("6sC5C8VFoTpEZQVn3YK9EUSd5g3Cs6zTT3HCDBGQkyo4");
+declare_id!("53816dMbda2xpX1XTo9883M6qCMeC6J9dpfftGJRaspj");
 
 
 const SUPPORTED_EXTENSIONS: &[ExtensionType] = &[

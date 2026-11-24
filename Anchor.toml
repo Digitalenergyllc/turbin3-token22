@@ -7,11 +7,11 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-t22 = "6sC5C8VFoTpEZQVn3YK9EUSd5g3Cs6zTT3HCDBGQkyo4"
+t22 = "53816dMbda2xpX1XTo9883M6qCMeC6J9dpfftGJRaspj"
 
 [provider]
 cluster = "localnet"
-wallet = "~/.config/solana/id.json"
+wallet = "~/.config/solana/turbin3-class.json"
 
 [scripts]
 test = "cargo test"
