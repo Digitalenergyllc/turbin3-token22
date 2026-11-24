@@ -3,7 +3,8 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program::invoke;
 use anchor_spl::token_interface::{
     approve, initialize_mint2, mint_close_authority_initialize, spl_token_2022, transfer_checked, transfer_fee_initialize, Approve,
-    InitializeMint2, Mint, MintCloseAuthorityInitialize, TokenInterface, TransferChecked, TransferFeeInitialize,
+    InitializeMint2, Mint, MintCloseAuthorityInitialize, TokenInterface, TransferChecked, TransferFeeInitialize, default_account_state_initialize, metadata_pointer_initialize, token_metadata_initialize,
+DefaultAccountStateInitialize, MetadataPointerInitialize, TokenMetadataInitialize,
 };
 use spl_token_2022::{
     extension::{
@@ -12,7 +13,7 @@ use spl_token_2022::{
         transfer_fee::TransferFeeConfig, BaseStateWithExtensions, ExtensionType,
         StateWithExtensions,
     },
-    state::Mint as MintState,
+    state::{AccountState, Mint as MintState},
 };
 
 // The length of a ciphertext which is how a decryptable balance is represented in the account data
@@ -140,6 +141,121 @@ pub mod t22 {
             ctx.accounts.mint.key(),
             space
         );
+        Ok(())
+    }
+#[derive(Accounts)]
+pub struct CreateStablecoinMint<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: created and initialized in the handler; signs because it is
+    /// made at its own address.
+    #[account(mut, signer)]
+    pub mint: UncheckedAccount<'info>,
+    pub token_program: Interface<'info, TokenInterface>,
+    pub system_program: Program<'info, System>,
+}
+
+        /// Week 4, Task 1: remittance stablecoin mint.
+    /// Four fixed-size extensions, all initialized before InitializeMint2,
+    /// then on-chain metadata stored in the mint itself.
+    pub fn create_stablecoin_mint(
+        ctx: Context<CreateStablecoinMint>,
+        decimals: u8,
+        basis_points: u16,
+        maximum_fee: u64,
+        name: String,
+        symbol: String,
+        uri: String,
+    ) -> Result<()> {
+        let payer = ctx.accounts.payer.key();
+        let mint_key = ctx.accounts.mint.key();
+        let token_program = ctx.accounts.token_program.key();
+        let mint_info = ctx.accounts.mint.to_account_info();
+        let program_info = ctx.accounts.token_program.to_account_info();
+
+        // Phase 1: size for the four fixed-length extensions.
+        let space = ExtensionType::try_calculate_account_len::<MintState>(&[
+            ExtensionType::TransferFeeConfig,
+            ExtensionType::MetadataPointer,
+            ExtensionType::DefaultAccountState,
+            ExtensionType::MintCloseAuthority,
+        ])?;
+        // Metadata is variable length and written after InitializeMint2, which
+        // grows the account. Fund that growth now: TLV header 4, update
+        // authority 32, mint 32, three length-prefixed strings, empty vec 4.
+        let metadata_len = 4 + 32 + 32 + (4 + name.len()) + (4 + symbol.len()) + (4 + uri.len()) + 4;
+        let lamports = Rent::get()?.minimum_balance(space + metadata_len);
+
+        anchor_lang::system_program::create_account(
+            CpiContext::new(
+                ctx.accounts.system_program.key(),
+                anchor_lang::system_program::CreateAccount {
+                    from: ctx.accounts.payer.to_account_info(),
+                    to: mint_info.clone(),
+                },
+            ),
+            lamports,
+            space as u64,
+            &token_program,
+        )?;
+
+        // Phase 2: every extension before InitializeMint2.
+        transfer_fee_initialize(
+            CpiContext::new(token_program, TransferFeeInitialize {
+                token_program_id: program_info.clone(),
+                mint: mint_info.clone(),
+            }),
+            Some(&payer),
+            Some(&payer),
+            basis_points,
+            maximum_fee,
+        )?;
+        metadata_pointer_initialize(
+            CpiContext::new(token_program, MetadataPointerInitialize {
+                token_program_id: program_info.clone(),
+                mint: mint_info.clone(),
+            }),
+            Some(payer),
+            Some(mint_key), // points at the mint itself
+        )?;
+        default_account_state_initialize(
+            CpiContext::new(token_program, DefaultAccountStateInitialize {
+                token_program_id: program_info.clone(),
+                mint: mint_info.clone(),
+            }),
+            &AccountState::Frozen,
+        )?;
+        mint_close_authority_initialize(
+            CpiContext::new(token_program, MintCloseAuthorityInitialize {
+                token_program_id: program_info.clone(),
+                mint: mint_info.clone(),
+            }),
+            Some(&payer),
+        )?;
+
+        // Phase 3: seal. Freeze authority is required by DefaultAccountState::Frozen.
+        initialize_mint2(
+            CpiContext::new(token_program, InitializeMint2 { mint: mint_info.clone() }),
+            decimals,
+            &payer,
+            Some(&payer),
+        )?;
+
+        // Phase 4: metadata lives in the mint the pointer names.
+        token_metadata_initialize(
+            CpiContext::new(token_program, TokenMetadataInitialize {
+                program_id: program_info,
+                metadata: mint_info.clone(),
+                update_authority: ctx.accounts.payer.to_account_info(),
+                mint_authority: ctx.accounts.payer.to_account_info(),
+                mint: mint_info,
+            }),
+            name,
+            symbol,
+            uri,
+        )?;
+
+        msg!("stablecoin mint {} created", mint_key);
         Ok(())
     }
 
