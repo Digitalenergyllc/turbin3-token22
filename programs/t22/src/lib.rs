@@ -4,7 +4,8 @@ use anchor_lang::solana_program::program::invoke;
 use anchor_spl::token_interface::{
     approve, initialize_mint2, mint_close_authority_initialize, spl_token_2022, transfer_checked, transfer_fee_initialize, Approve,
     InitializeMint2, Mint, MintCloseAuthorityInitialize, TokenInterface, TransferChecked, TransferFeeInitialize, default_account_state_initialize, metadata_pointer_initialize, token_metadata_initialize,
-DefaultAccountStateInitialize, MetadataPointerInitialize, TokenMetadataInitialize,
+DefaultAccountStateInitialize, MetadataPointerInitialize, TokenMetadataInitialize, 
+thaw_account, ThawAccount,
 };
 use spl_token_2022::{
     extension::{
@@ -256,6 +257,32 @@ pub struct CreateStablecoinMint<'info> {
         )?;
 
         msg!("stablecoin mint {} created", mint_key);
+        Ok(())
+    }
+#[derive(Accounts)]
+pub struct KycThaw<'info> {
+    /// CHECK: Token-2022 validates it is a frozen account of this mint.
+    #[account(mut, owner = token_program.key())]
+    pub token_account: UncheckedAccount<'info>,
+    /// CHECK: Token-2022 checks freeze_authority against this mint.
+    #[account(owner = token_program.key())]
+    pub mint: UncheckedAccount<'info>,
+    pub freeze_authority: Signer<'info>,
+    pub token_program: Interface<'info, TokenInterface>,
+}
+
+    /// Week 4, Task 4: KYC cleared. The freeze authority thaws one holder's
+    /// account. The mint's DefaultAccountState stays Frozen for everyone else.
+    pub fn kyc_thaw(ctx: Context<KycThaw>) -> Result<()> {
+        thaw_account(CpiContext::new(
+            ctx.accounts.token_program.key(),
+            ThawAccount {
+                account: ctx.accounts.token_account.to_account_info(),
+                mint: ctx.accounts.mint.to_account_info(),
+                authority: ctx.accounts.freeze_authority.to_account_info(),
+            },
+        ))?;
+        msg!("KYC cleared: {} thawed", ctx.accounts.token_account.key());
         Ok(())
     }
 
