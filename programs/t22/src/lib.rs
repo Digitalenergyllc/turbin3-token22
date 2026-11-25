@@ -4,7 +4,7 @@ use anchor_lang::solana_program::program::invoke;
 use anchor_spl::token_interface::{
     approve, initialize_mint2, mint_close_authority_initialize, spl_token_2022, transfer_checked, transfer_fee_initialize, Approve,
     InitializeMint2, Mint, MintCloseAuthorityInitialize, TokenInterface, TransferChecked, TransferFeeInitialize, default_account_state_initialize, metadata_pointer_initialize, token_metadata_initialize,
-DefaultAccountStateInitialize, MetadataPointerInitialize, TokenMetadataInitialize, 
+DefaultAccountStateInitialize, MetadataPointerInitialize, TokenMetadataInitialize, transfer_checked_with_fee, TransferCheckedWithFee,
 thaw_account, ThawAccount,
 };
 use spl_token_2022::{
@@ -285,7 +285,57 @@ pub struct KycThaw<'info> {
         msg!("KYC cleared: {} thawed", ctx.accounts.token_account.key());
         Ok(())
     }
+#[derive(Accounts)]
+pub struct TransferWithFee<'info> {
+    /// CHECK: Token-2022 validates mint, owner and frozen state.
+    #[account(mut, owner = token_program.key())]
+    pub source: UncheckedAccount<'info>,
+    /// CHECK: owner enforced; contents parsed with StateWithExtensions.
+    #[account(owner = token_program.key())]
+    pub mint: UncheckedAccount<'info>,
+    /// CHECK: Token-2022 validates it.
+    #[account(mut, owner = token_program.key())]
+    pub destination: UncheckedAccount<'info>,
+    pub owner: Signer<'info>,
+    pub token_program: Interface<'info, TokenInterface>,
+}
+        /// Week 4, Task 2: transfer that states the exact fee up front.
+    /// The fee is computed from the mint's live config for the current epoch,
+    /// read through StateWithExtensions (Task 3), never from a cached rate.
+    pub fn transfer_with_fee(ctx: Context<TransferWithFee>, amount: u64) -> Result<()> {
+        let mint_info = ctx.accounts.mint.to_account_info();
 
+        // Borrow the mint's bytes in their own block, so the borrow ends
+        // before the CPI below needs the account again.
+        let (decimals, fee) = {
+            let data = mint_info.try_borrow_data()?;
+            let state = StateWithExtensions::<MintState>::unpack(&data)?;
+            let config = state.get_extension::<TransferFeeConfig>()?;
+            let epoch = Clock::get()?.epoch;
+            let fee = config
+                .calculate_epoch_fee(epoch, amount)
+                .ok_or(MintError::FeeCalculationFailed)?;
+            (state.base.decimals, fee)
+        };
+
+        transfer_checked_with_fee(
+            CpiContext::new(
+                ctx.accounts.token_program.key(),
+                TransferCheckedWithFee {
+                    token_program_id: ctx.accounts.token_program.to_account_info(),
+                    source: ctx.accounts.source.to_account_info(),
+                    mint: mint_info,
+                    destination: ctx.accounts.destination.to_account_info(),
+                    authority: ctx.accounts.owner.to_account_info(),
+                },
+            ),
+            amount,
+            decimals,
+            fee,
+        )?;
+        msg!("sent {} with fee {}", amount, fee);
+        Ok(())
+    }
     /// `InterfaceAccount<'info, Mint>` looks like it gives you the whole mint.
     /// It does not. Anchor's deserializer runs
     /// `StateWithExtensions::unpack(buf).map(|t| Mint(t.base))`, which parses
@@ -820,4 +870,6 @@ pub struct PermanentDelegateSeize<'info> {
 pub enum MintError {
     #[msg("mint carries an extension this program has not been written to handle")]
     UnsupportedExtension,
+    #[msg("fee calculation overflowed")]
+    FeeCalculationFailed,
 }

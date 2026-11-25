@@ -6,7 +6,7 @@ use anchor_lang::{
 use anchor_spl::token_interface::spl_token_2022::{
     extension::{
         default_account_state::DefaultAccountState, metadata_pointer::MetadataPointer,
-        transfer_fee::TransferFeeConfig, BaseStateWithExtensions, ExtensionType,
+        transfer_fee::{TransferFeeAmount, TransferFeeConfig}, BaseStateWithExtensions, ExtensionType,
         StateWithExtensions,
     },
     instruction::{initialize_account3, mint_to},
@@ -124,6 +124,39 @@ fn kyc_thaw_ix(token_account: &Pubkey, mint: &Pubkey, freeze_authority: &Pubkey)
         data: instruction::KycThaw {}.data(),
     }
 }
+fn transfer_with_fee_ix(source: &Pubkey, mint: &Pubkey, destination: &Pubkey, owner: &Pubkey, amount: u64) -> Instruction {
+    Instruction {
+        program_id: ID,
+        accounts: accounts::TransferWithFee {
+            source: *source,
+            mint: *mint,
+            destination: *destination,
+            owner: *owner,
+            token_program: TOKEN_2022_PROGRAM_ID,
+        }
+        .to_account_metas(None),
+        data: instruction::TransferWithFee { amount }.data(),
+    }
+}
+
+fn withheld(svm: &LiteSVM, account: &Pubkey) -> u64 {
+    let data = svm.get_account(account).unwrap().data;
+    let state = StateWithExtensions::<TokenAccountState>::unpack(&data).unwrap();
+    u64::from(state.get_extension::<TransferFeeAmount>().unwrap().withheld_amount)
+}
+
+/// Mint, two KYC'd holders, Alice funded with `funding`.
+fn funded_pair(svm: &mut LiteSVM, payer: &Keypair, funding: u64) -> (Pubkey, Keypair, Pubkey, Pubkey) {
+    let mint = create_stablecoin(svm, payer).pubkey();
+    let alice = Keypair::new();
+    let bob = Keypair::new();
+    let alice_ta = create_holder(svm, payer, &mint, &alice.pubkey());
+    let bob_ta = create_holder(svm, payer, &mint, &bob.pubkey());
+    send(svm, payer, &[kyc_thaw_ix(&alice_ta, &mint, &payer.pubkey()), kyc_thaw_ix(&bob_ta, &mint, &payer.pubkey())], &[]);
+    send(svm, payer, &[mint_to(&TOKEN_2022_PROGRAM_ID, &mint, &alice_ta, &payer.pubkey(), &[], funding).unwrap()], &[]);
+    (mint, alice, alice_ta, bob_ta)
+}
+
 #[test]
 fn stablecoin_mint_stacks_four_extensions_plus_metadata() {
     let (mut svm, payer) = setup();
@@ -202,4 +235,26 @@ fn only_freeze_authority_can_thaw() {
     let logs = send_expect_fail(&mut svm, &alice, &[kyc_thaw_ix(&alice_ta, &mint, &alice.pubkey())], &[]);
     assert!(logs.iter().any(|l| l.contains("owner does not match")), "{:?}", logs);
     assert_eq!(read_holder(&svm, &alice_ta).0, AccountState::Frozen);
+}
+#[test]
+fn transfer_withholds_the_epoch_fee() {
+    let (mut svm, payer) = setup();
+    let (mint, alice, alice_ta, bob_ta) = funded_pair(&mut svm, &payer, 100_000_000); // 100 tokens
+
+    // Send 10 tokens at 0.5%: fee = 0.05 tokens = 50_000 base units.
+    send(&mut svm, &payer, &[transfer_with_fee_ix(&alice_ta, &mint, &bob_ta, &alice.pubkey(), 10_000_000)], &[&alice]);
+
+    assert_eq!(read_holder(&svm, &alice_ta).1, 90_000_000); // full amount leaves Alice
+    assert_eq!(read_holder(&svm, &bob_ta).1, 9_950_000);    // Bob receives amount minus fee   // balance shows the gross amount
+    assert_eq!(withheld(&svm, &bob_ta), 50_000);            // fee is held in Bob's account for the issuer
+}
+
+#[test]
+fn large_transfer_fee_is_capped_at_maximum() {
+    let (mut svm, payer) = setup();
+    let (mint, alice, alice_ta, bob_ta) = funded_pair(&mut svm, &payer, 3_000_000_000); // 3,000 tokens
+
+    // 2,000 tokens at 0.5% would be 10 tokens, but the cap is 5.
+    send(&mut svm, &payer, &[transfer_with_fee_ix(&alice_ta, &mint, &bob_ta, &alice.pubkey(), 2_000_000_000)], &[&alice]);
+    assert_eq!(withheld(&svm, &bob_ta), MAX_FEE);
 }
